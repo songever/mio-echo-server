@@ -1,3 +1,4 @@
+use std::arch::x86_64::_MM_MANT_NORM_P75_1P5;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
@@ -67,33 +68,50 @@ WRITABLE)?;
     }
 
     fn process_echo(&mut self, token: Token) -> Result<()> {
+        let mut connection_closed = false;
         let buf = self.buffers.entry(token).or_insert_with(Vec::new);
-
+        
         if let Some(connection) = self.connections.get_mut(&token) {
             let mut temp = [0u8; 1024];
-            match connection.read(&mut temp) {
-                Ok(n) => {
-                    buf.extend_from_slice(&temp[..n]);
-                    if let Err(e) = connection.write_all(&temp[..n]) {
-                        eprintln!("Failed to write to connection {:?}: {}", token, e);
+                loop {
+                    match connection.read(&mut temp) {
+                        Ok(0) => {
+                            connection_closed = true;
+                            match self.buffers.get(&token) {
+                                Some(buf) => if let Err(e) = connection.write_all(buf) {
+                                    eprintln!("Failed to write to connection {:?}: {}", token, e)
+                                },
+                                None => eprintln!("Cannot find buffer {:?}", token)
+                            }
+                            break;
+                        }
+                        Ok(n) => {
+                            buf.extend_from_slice(&temp[..n]);
+                        }
+                        Err(ref err) if would_block(err) => {
+                            println!("Would block on connection {:?}", token);
+                            break
+                        }
+                        Err(ref err) if interrupted(err) => continue,
+                        Err(err) => {
+                            eprintln!("Failed to read from connection {:?}: {}", token, err);
+                            return Err(err.into());
+                        }
+                        
                     }
-                    println!("{}", String::from_utf8_lossy(&temp[..n]));
-                    self.poll.registry().deregister(connection)?;
-                    self.connections.remove(&token);
-                    self.buffers.remove(&token);
                 }
-                Err(ref err) if would_block(err) => {
-                    println!("Would block on connection {:?}", token);
-                }
-                Err(err) => {
-                    eprintln!("Failed to read from connection {:?}: {}", token, err);
-                    return Err(err.into());
-                }
+
+            println!("{}", String::from_utf8_lossy(&temp[..]));
+        
+            if connection_closed {
+                self.poll.registry().deregister(connection)?;
+                self.connections.remove(&token);
+                self.buffers.remove(&token);
+                println!("Connection closed");
             }
         }
         Ok(())
     }
-
 } 
 fn main() -> Result<()> {
     Server::new(SocketAddr::from(([127, 0, 0, 1], 8080)))?.run()
@@ -104,3 +122,6 @@ fn would_block(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::WouldBlock
 }
 
+fn interrupted(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
+}
