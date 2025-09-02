@@ -22,7 +22,7 @@ fn main() -> Result<()> {
 
         for event in events.iter() {
             match event.token() {
-                SERVER => {
+                SERVER => loop {
                     match listener.accept() {
                         Ok((connection, address)) => {
                             println!("Got a connection from: {}", address);
